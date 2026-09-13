@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+
+concurrency:
+  group: ci-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Commit dist
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dist
+          git diff --cached --quiet || (git commit -m 'chore: build dist' && git push)
+
+      - name: Version or release
+        id: changesets
+        if: github.ref == 'refs/heads/main'
+        uses: changesets/action@v2.1.2
+        with:
+          version-script: npm run changeset:version
+          publish-script: npx changeset publish
+
+      - name: Move major tag
+        if: steps.changesets.outputs.published == 'true'
+        run: |
+          major="v$(jq -r .version package.json | cut -d. -f1)"
+          git tag -f "$major"
+          git push -f origin "$major"

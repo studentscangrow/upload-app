@@ -1,134 +1,35 @@
-name: "Upload app to TdA"
-description: "Upload action for the Tour de App competition"
-author: "Student Cyber Games"
+name: Upload app to TdA
+description: Build, push and upload your app to Tour de Cloud for the Tour de App competition
+author: Student Cyber Games
 branding:
   color: orange
   icon: server
+
 inputs:
   tdc_token:
-    description: "Access token"
+    description: Tour de Cloud team API token
     required: true
-  api_domain:
-    description: "Prefix for the service"
-    default: "portalbush.tourde.cloud"
-  registry_domain:
-    description: "Registry domain"
-    default: "registry.tourde.cloud"
+  api_url:
+    description: Tour de Cloud API v2 base URL
+    required: false
+    default: https://tourde.cloud/api/v2
+  config_path:
+    description: Path to the Tour de Cloud application manifest
+    required: false
+    default: tourdeapp.yaml
+  debug:
+    description: Log API requests and responses
+    required: false
+    default: 'false'
+
+outputs:
+  upload_id:
+    description: Identifier assigned by the upload preflight
+  images:
+    description: JSON array of successfully pushed image references
+  deployable:
+    description: Whether the completed upload is deployable
 
 runs:
-  using: "composite"
-  steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '24'
-
-    - shell: bash
-      run: npm install -g ajv-cli
-
-    - name: Validate configuration files
-      env: ${{ env }}
-      shell: bash
-      run: |
-        if [ ! -f "tourdeapp.yaml" ]; then
-          echo "❌ tourdeapp.yaml not found!"
-          exit 1
-        fi
-
-        perl -pe 's/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/defined $ENV{$1} ? $ENV{$1} : $&/ge' tourdeapp.yaml > tourdeapp.tmp && mv tourdeapp.tmp tourdeapp.yaml
-
-        curl -o schema.json --fail-with-body https://${{ inputs.api_domain }}/static/schema.json
-        yq eval -o=json tourdeapp.yaml > tourdeapp.json
-        ajv --spec=draft2020 validate -s schema.json -d tourdeapp.json
-
-    - name: Check if paid
-      id: check_payment
-      shell: bash
-      run: |
-        response=$(curl -s -w "\n%{http_code}" "https://${{ inputs.api_domain }}/api/public/v1/payment" \
-          -H "Authorization: Bearer ${{ inputs.tdc_token }}")
-
-        http_body=$(printf "%s" "$response" | sed '$d')
-        http_code=$(printf "%s" "$response" | tail -n 1)
-
-        if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-          error_message=$(echo "$http_body" | jq -r '.error.message // "Unknown error occurred"')
-
-          printf "HTTP Status : %s\n" "$http_code"
-          printf "Message     : %s\n" "$error_message"
-
-          exit 1
-        fi
-
-        paid=$(echo "$http_body" | jq -r '.paid // empty')
-        documentId=$(echo "$http_body" | jq -r '.documentId // empty')
-        slug=$(echo "$http_body" | jq -r '.slug // empty')
-
-        if [ -z "$paid" ] || [ -z "$documentId" ] || [ -z "$slug" ]; then
-          printf "\nERROR: Successful response missing required fields\n"
-          printf "Response body:\n%s\n\n" "$http_body"
-          exit 1
-        fi
-
-        if [ "$paid" != "true" ]; then
-          printf "\n\n######################################################################################\n"
-          printf "# Payment required: please pay the entry fee to deploy your application.             #\n"
-          printf "# Syncs are made every 8 hours.                                                       #\n"
-          printf "######################################################################################\n\n"
-          exit 1
-        fi
-
-        echo "documentId=$documentId" >> $GITHUB_OUTPUT
-        echo "slug=$slug" >> $GITHUB_OUTPUT
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build Docker images
-      shell: bash
-      env:
-        REGISTRY_URL: ${{ inputs.registry_domain }}
-        REGISTRY_PASSWORD: ${{ inputs.tdc_token }}
-      run: |
-        set -e
-
-        for i in $(yq eval '.build | keys | .[]' tourdeapp.yaml); do
-          commit_hash=$(git rev-parse --short HEAD)
-          image_fqn="${{ steps.check_payment.outputs.slug }}/$(yq eval ".build[$i].name" tourdeapp.yaml):${commit_hash}"
-        
-          dockerfile=$(yq eval ".build[$i].dockerfile // \"\"" tourdeapp.yaml)
-          context=$(yq eval ".build[$i].context // \".\"" tourdeapp.yaml)
-          args=$(yq eval ".build[$i].args // {}" tourdeapp.yaml -j)
-
-          build_args=""
-          for key in $(echo "$args" | jq -r 'keys[]'); do
-            val=$(echo "$args" | jq -r --arg k "$key" '.[$k]')
-            export build_arg_$key="$val"
-            build_args+="--build-arg $key=$val"
-          done
-
-          echo "docker build -f "$dockerfile" $build_args --cache-from=type=gha --cache-to=type=gha,mode=max -t $REGISTRY_URL/${image_fqn} $context"
-          echo "Building Docker image with Dockerfile: $dockerfile, context: $context, tag: $REGISTRY_URL/${image_fqn}, args: $build_args"
-          docker build -f "$dockerfile" $build_args --cache-from=type=gha --cache-to=type=gha,mode=max -t $REGISTRY_URL/${image_fqn} $context
-        done
-
-        docker login $REGISTRY_URL --username user --password $REGISTRY_PASSWORD
-        for i in $(yq eval '.build | keys | .[]' tourdeapp.yaml); do
-          docker push $REGISTRY_URL/${{ steps.check_payment.outputs.slug }}/$(yq eval ".build[$i].name" tourdeapp.yaml):$(git rev-parse --short HEAD)
-        done
-
-    - name: Upload application configuration
-      shell: bash
-      run: |
-        set -e
-
-        commit_hash=$(git rev-parse --short HEAD)
-        
-        branch_name=${GITHUB_REF#refs/heads/}
-        echo "Uploading configuration for commit $commit_hash on branch $branch_name"
-        
-        curl --fail-with-body -X POST "https://${{ inputs.api_domain }}/api/public/v1/${{ steps.check_payment.outputs.documentId }}/config" \
-        -H "Authorization: Bearer ${{ inputs.tdc_token }}" \
-        -Ffile=@tourdeapp.yaml -Fbranch="$branch_name" -Fcommit="$commit_hash"
+  using: node24
+  main: dist/index.js
